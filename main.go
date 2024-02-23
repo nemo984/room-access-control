@@ -2,22 +2,49 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/jmoiron/sqlx"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
-func hello(w http.ResponseWriter, req *http.Request) {
-	fmt.Fprintf(w, "hello\n")
-}
-
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	db, err := sqlx.Open("postgres", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	err = db.Ping()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("ap-southeast-1"))
+	if err != nil {
+		log.Fatalf("failed to load configuration, %v", err)
+	}
+
+	snsClient := sns.NewFromConfig(cfg)
+	accessLogService := NewAccessLogService(db)
+	handler := NewHandler(db, accessLogService, snsClient)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/hello", hello)
+	mux.HandleFunc("/verify-access", handler.VerifyAccess)
 
 	port := os.Getenv("PORT")
 	if port == "" {
