@@ -45,10 +45,16 @@ type AccessLogService interface {
 	Create(context context.Context, log AccessLog) error
 }
 
+type accessCache struct {
+	UserID string
+	RoomID string
+}
+
 type handler struct {
 	db               *sqlx.DB
 	accessLogService AccessLogService
 	snsClient        *sns.Client
+	cache            *cache[string, accessCache]
 }
 
 func NewHandler(db *sqlx.DB, accessLogService AccessLogService, snsClient *sns.Client) *handler {
@@ -56,6 +62,7 @@ func NewHandler(db *sqlx.DB, accessLogService AccessLogService, snsClient *sns.C
 		db:               db,
 		accessLogService: accessLogService,
 		snsClient:        snsClient,
+		cache:            newCache[string, accessCache](),
 	}
 }
 
@@ -69,6 +76,15 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 	currentDate := time.Now()
 	currentTime := currentDate.Format("15:04")
 	currentDay := currentDate.Weekday().String()
+
+	cacheKey := fmt.Sprintf("%s-%s-%s-%s", r.SensorID, r.Key, r.Type, currentDay)
+	if ac, ok := h.cache.get(cacheKey); ok {
+		go func() {
+			h.logAccess(ac.UserID, ac.RoomID, string(r.Type), true, "")
+		}()
+		fmt.Fprintf(w, "Access granted\n")
+		return
+	}
 
 	var result QueryResult
 	query := `
@@ -125,26 +141,35 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 
 	slog.Info("Access granted", "scheduleId", result.ScheduleID, "scheduleName", result.ScheduleName, "roleID", result.RoleID, "roleName", result.RoleName, "userID", result.UserID, "userFingerprintID", result.UserFingerprintID, "userNfcID", result.UserNfcID, "roomID", result.RoomID, "roomSNSTopicARN", result.RoomSnsTopicARN, "sensorID", result.SensorID, "type", result.Type)
 	fmt.Fprintf(w, "Access granted\n")
+	h.cache.put(cacheKey, accessCache{
+		UserID: result.UserID,
+		RoomID: result.RoomID,
+	})
 	go func() {
-		if err := h.accessLogService.Create(context.TODO(), AccessLog{
-			UserID:          result.UserID,
-			RoomID:          result.RoomID,
-			Method:          string(result.Type),
-			IsGrantedAccess: true,
-			Reason:          "Access granted",
-		}); err != nil {
-			slog.Error("Error creating access log", "error", err)
-		}
-
-		if result.RoomSnsTopicARN != nil && *result.RoomSnsTopicARN != "" {
-			// 	_, err := SNSClient.Publish(context.TODO(), &sns.PublishInput{
-			// 		Message:  &result.Username,
-			// 		TopicArn: result.RoomSnsTopicARN,
-			// 	})
-			// 	if err != nil {
-			// 		slog.Error("Error publishing to SNS", "error", err)
-			// 	}
-		}
+		h.logAccess(result.UserID, result.RoomID, string(r.Type), true, "")
 	}()
 
+}
+
+func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, reason string) {
+	slog.Info("Access granted", "userID", userID, "roomID", roomID, "type", method)
+	if err := h.accessLogService.Create(context.TODO(), AccessLog{
+		UserID:          userID,
+		RoomID:          roomID,
+		Method:          method,
+		IsGrantedAccess: isGrantedAccess,
+		Reason:          reason,
+	}); err != nil {
+		slog.Error("Error creating access log", "error", err)
+	}
+
+	// if result.RoomSnsTopicARN != nil && *result.RoomSnsTopicARN != "" {
+	// 	_, err := SNSClient.Publish(context.TODO(), &sns.PublishInput{
+	// 		Message:  &result.Username,
+	// 		TopicArn: result.RoomSnsTopicARN,
+	// 	})
+	// 	if err != nil {
+	// 		slog.Error("Error publishing to SNS", "error", err)
+	// 	}
+	// }
 }
