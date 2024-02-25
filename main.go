@@ -31,6 +31,12 @@ func main() {
 		log.Fatalf("failed to load configuration, %v", err)
 	}
 
+	loc, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		log.Fatal(err)
+	}
+	time.Local = loc
+
 	snsClient := sns.NewFromConfig(cfg)
 	accessLogService := NewAccessLogService(db)
 	handler := NewHandler(db, accessLogService, snsClient)
