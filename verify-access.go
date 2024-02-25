@@ -44,6 +44,11 @@ type QueryResult struct {
 	To                string  `db:"to"`
 }
 
+type UserAndRoomQueryResult struct {
+	UserID string `db:"userId"`
+	RoomID string `db:"roomId"`
+}
+
 type AccessLogService interface {
 	Create(context context.Context, log AccessLog) error
 }
@@ -84,7 +89,9 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 	if ok {
 		if u, ok := ac[r.Key]; ok {
 			go func() {
-				h.logAccess(u.UserID, u.RoomID, string(r.Type), true, "")
+				if err := h.logAccess(u.UserID, u.RoomID, string(r.Type), true, ""); err != nil {
+					slog.Error("Error creating access log", "error", err)
+				}
 			}()
 			fmt.Fprintf(w, "Access granted\n")
 			return
@@ -93,6 +100,7 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 		ac = make(map[string]accessCache)
 	}
 
+	// COULDDO: call as method of another service
 	var result QueryResult
 	query := `
 		SELECT
@@ -123,28 +131,46 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 		WHERE a.active = 'true'
 		  AND t.day = $1
 		  AND t.from <= $2
-		  AND t.to >= $3
+		  AND t.to >= $2
 		  AND (
-			us."fingerprintId" = $4
-			OR us."nfcId" = $5
+			us."fingerprintId" = $3
+			OR us."nfcId" = $3
 		  )
 		  AND (
 			susp.id IS NULL
 			OR (
 				susp."isPermanent" = 'false'
-		  		AND (susp."startDate" > $6 OR susp."endDate" < $7)
+		  		AND (susp."startDate" > $4 OR susp."endDate" < $4)
 			)
 		  )
-		  AND s.id = $8
+		  AND s.id = $5
   		LIMIT 1`
 
-	err := h.db.Get(&result, query, currentDay, currentTime, currentTime, r.Key, r.Key, currentDate, currentDate, r.SensorID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			http.Error(w, "No matching schedule found", http.StatusNotFound)
+	if err := h.db.Get(&result, query, currentDay, currentTime, r.Key, currentDate, r.SensorID); err != nil {
+		if err != sql.ErrNoRows {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+
+		// See if room and user can be matched from the key and sensorid
+		go func() {
+			query := `
+			SELECT
+				us.id AS "userId",
+				roo.id AS "roomId"
+			FROM public."User" AS us
+			INNER JOIN public."DoorAccessSensor" AS s ON s.id = $1
+			INNER JOIN public."Room" AS roo ON s."roomId" = roo.id
+			WHERE us."fingerprintId" = $2 OR us."nfcId" = $2	  
+			`
+			var res UserAndRoomQueryResult
+			if err := h.db.Get(&res, query, r.SensorID, r.Key); err == nil { // no error
+				if err := h.logAccess(res.UserID, res.RoomID, string(r.Type), false, "no matching schedule"); err != nil {
+					slog.Error("Error creating access log", "error", err)
+				}
+			}
+		}()
+		http.Error(w, "no valid schedule or insufficient role", http.StatusUnauthorized)
 		return
 	}
 
@@ -164,7 +190,6 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, reason string) error {
-	slog.Info("Access granted", "userID", userID, "roomID", roomID, "type", method)
 	if err := h.accessLogService.Create(context.TODO(), AccessLog{
 		UserID:          userID,
 		RoomID:          roomID,
@@ -174,6 +199,9 @@ func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, 
 	}); err != nil {
 		return err
 	}
+
+	// TODO: if access denied more than 3?
+
 	// if result.RoomSnsTopicARN != nil && *result.RoomSnsTopicARN != "" {
 	// 	_, err := SNSClient.Publish(context.TODO(), &sns.PublishInput{
 	// 		Message:  &result.Username,

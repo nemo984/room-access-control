@@ -1,3 +1,4 @@
 .env
-*.sh
+lol.sh
 env-vars.txt
+tmp
