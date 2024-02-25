@@ -23,7 +23,7 @@ func NewAccessLogService(db *sqlx.DB) *accessLogService {
 }
 
 func (s *accessLogService) Create(ctx context.Context, log AccessLog) error {
-	query := `INSERT INTO user_room_access_log (userId, method, roomId, isGrantedAccess, reason, createdAt) VALUES (?, ?, ?, ?, ?, NOW())`
+	query := `INSERT INTO "UserRoomAccessLog" ("userId", "method", "roomId", "isGrantedAccess", "reason", "createdAt") VALUES ($1, $2, $3, $4, $5, NOW())`
 	_, err := s.db.ExecContext(ctx, query, log.UserID, log.Method, log.RoomID, log.IsGrantedAccess, log.Reason)
 	return err
 }

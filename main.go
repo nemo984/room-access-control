@@ -37,6 +37,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/verify-access", handler.VerifyAccess)
+	mux.HandleFunc("/clear-access-cache", handler.ClearAccessCache)
 
 	port := os.Getenv("PORT")
 	if port == "" {

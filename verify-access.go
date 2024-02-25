@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
@@ -39,6 +40,8 @@ type QueryResult struct {
 	RoomSnsTopicARN   *string `db:"roomSnsTopicArn"`
 	SensorID          string  `db:"sensorId"`
 	Type              string  `db:"type"`
+	From              string  `db:"from"`
+	To                string  `db:"to"`
 }
 
 type AccessLogService interface {
@@ -54,7 +57,7 @@ type handler struct {
 	db               *sqlx.DB
 	accessLogService AccessLogService
 	snsClient        *sns.Client
-	cache            *cache[string, accessCache]
+	cache            *cache[string, map[string]accessCache] // sensorId -> key -> accessCache
 }
 
 func NewHandler(db *sqlx.DB, accessLogService AccessLogService, snsClient *sns.Client) *handler {
@@ -62,7 +65,7 @@ func NewHandler(db *sqlx.DB, accessLogService AccessLogService, snsClient *sns.C
 		db:               db,
 		accessLogService: accessLogService,
 		snsClient:        snsClient,
-		cache:            newCache[string, accessCache](),
+		cache:            newCache[string, map[string]accessCache](),
 	}
 }
 
@@ -77,13 +80,17 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 	currentTime := currentDate.Format("15:04")
 	currentDay := currentDate.Weekday().String()
 
-	cacheKey := fmt.Sprintf("%s-%s-%s-%s", r.SensorID, r.Key, r.Type, currentDay)
-	if ac, ok := h.cache.get(cacheKey); ok {
-		go func() {
-			h.logAccess(ac.UserID, ac.RoomID, string(r.Type), true, "")
-		}()
-		fmt.Fprintf(w, "Access granted\n")
-		return
+	ac, ok := h.cache.get(r.SensorID)
+	if ok {
+		if u, ok := ac[r.Key]; ok {
+			go func() {
+				h.logAccess(u.UserID, u.RoomID, string(r.Type), true, "")
+			}()
+			fmt.Fprintf(w, "Access granted\n")
+			return
+		}
+	} else {
+		ac = make(map[string]accessCache)
 	}
 
 	var result QueryResult
@@ -100,7 +107,9 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 			roo.id AS "roomId",
 			roo."snsTopicArn" AS "roomSnsTopicArn",
 			s.id AS "sensorId",
-			s.type AS "type"
+			s.type AS "type",
+			t.from AS "from",
+			t.to AS "to"
 		FROM public."AccessSchedule" AS a
 		INNER JOIN public."AccessScheduleTime" AS t ON t."accessScheduleId" = a.id
 		INNER JOIN public."_AccessScheduleToRole" AS r ON r."A" = a.id
@@ -140,18 +149,21 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 	}
 
 	slog.Info("Access granted", "scheduleId", result.ScheduleID, "scheduleName", result.ScheduleName, "roleID", result.RoleID, "roleName", result.RoleName, "userID", result.UserID, "userFingerprintID", result.UserFingerprintID, "userNfcID", result.UserNfcID, "roomID", result.RoomID, "roomSNSTopicARN", result.RoomSnsTopicARN, "sensorID", result.SensorID, "type", result.Type)
-	fmt.Fprintf(w, "Access granted\n")
-	h.cache.put(cacheKey, accessCache{
+	ac[r.Key] = accessCache{
 		UserID: result.UserID,
 		RoomID: result.RoomID,
-	})
-	go func() {
-		h.logAccess(result.UserID, result.RoomID, string(r.Type), true, "")
-	}()
+	}
 
+	h.cache.put(r.SensorID, ac, getCacheDuration(result.From, result.To))
+	go func() {
+		if err := h.logAccess(result.UserID, result.RoomID, string(r.Type), true, ""); err != nil {
+			slog.Error("Error creating access log", "error", err)
+		}
+	}()
+	fmt.Fprintf(w, "Access granted\n")
 }
 
-func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, reason string) {
+func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, reason string) error {
 	slog.Info("Access granted", "userID", userID, "roomID", roomID, "type", method)
 	if err := h.accessLogService.Create(context.TODO(), AccessLog{
 		UserID:          userID,
@@ -160,9 +172,8 @@ func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, 
 		IsGrantedAccess: isGrantedAccess,
 		Reason:          reason,
 	}); err != nil {
-		slog.Error("Error creating access log", "error", err)
+		return err
 	}
-
 	// if result.RoomSnsTopicARN != nil && *result.RoomSnsTopicARN != "" {
 	// 	_, err := SNSClient.Publish(context.TODO(), &sns.PublishInput{
 	// 		Message:  &result.Username,
@@ -172,4 +183,25 @@ func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, 
 	// 		slog.Error("Error publishing to SNS", "error", err)
 	// 	}
 	// }
+	return nil
+}
+
+func (h handler) ClearAccessCache(w http.ResponseWriter, req *http.Request) {
+	q := req.URL.Query().Get("sensorIds")
+	if q == "" {
+		h.cache.clear()
+		fmt.Fprintf(w, "Cache cleared\n")
+		return
+	}
+
+	sensorIDs := strings.Split(q, ",")
+	h.cache.removeKeys(sensorIDs)
+	fmt.Fprintf(w, "Cache cleared for sensorIds: %s\n", q)
+}
+
+func getCacheDuration(from, to string) time.Duration {
+	const timeLayout = "15:04"
+	fromTime, _ := time.Parse(timeLayout, from)
+	toTime, _ := time.Parse(timeLayout, to)
+	return toTime.Sub(fromTime)
 }
