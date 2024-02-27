@@ -186,7 +186,7 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 			slog.Error("Error creating access log", "error", err)
 		}
 	}()
-	fmt.Fprintf(w, "Access granted\n")
+	fmt.Fprintf(w, "Access Granted#%s", result.Username)
 }
 
 func (h handler) logAccess(userID, roomID, method string, isGrantedAccess bool, reason string) error {
