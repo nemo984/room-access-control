@@ -55,6 +55,7 @@ type AccessLogService interface {
 
 type accessCache struct {
 	UserID string
+	Name   string
 	RoomID string
 }
 
@@ -93,7 +94,7 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 					slog.Error("Error creating access log", "error", err)
 				}
 			}()
-			fmt.Fprintf(w, "Access granted\n")
+			fmt.Fprintf(w, "Access Granted#%s", u.Name)
 			return
 		}
 	} else {
@@ -177,6 +178,7 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 	slog.Info("Access granted", "scheduleId", result.ScheduleID, "scheduleName", result.ScheduleName, "roleID", result.RoleID, "roleName", result.RoleName, "userID", result.UserID, "userFingerprintID", result.UserFingerprintID, "userNfcID", result.UserNfcID, "roomID", result.RoomID, "roomSNSTopicARN", result.RoomSnsTopicARN, "sensorID", result.SensorID, "type", result.Type)
 	ac[r.Key] = accessCache{
 		UserID: result.UserID,
+		Name:   result.Username,
 		RoomID: result.RoomID,
 	}
 
