@@ -81,6 +81,7 @@ func (h handler) VerifyAccess(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	slog.Info("Access request", "sensorId", r.SensorID, "key", r.Key, "type", r.Type)
 
 	currentDate := time.Now()
 	currentTime := currentDate.Format("15:04")
